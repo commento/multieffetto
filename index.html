@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MultiEffetto</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <div>
+          <p class="eyebrow">REAL-TIME SAMPLE PROCESSOR</p>
+          <h1>Multi<span>Effetto</span></h1>
+        </div>
+        <div id="audioStatus" class="status"><i></i> pronto</div>
+      </header>
+
+      <section class="transport panel">
+        <label class="file-picker">
+          <input id="fileInput" type="file" accept="audio/*" />
+          <span>Carica campione</span>
+        </label>
+        <div class="sample-info">
+          <strong id="sampleName">Nessun campione</strong>
+          <small id="sampleMeta">WAV, MP3, M4A, OGG</small>
+        </div>
+        <div class="buttons" aria-label="Controlli di trasporto">
+          <button id="playButton" class="primary" aria-label="Play">▶</button>
+          <button id="pauseButton" aria-label="Pausa">Ⅱ</button>
+          <button id="stopButton" aria-label="Stop">■</button>
+        </div>
+      </section>
+
+      <section class="timeline panel">
+        <input id="position" type="range" min="0" max="1" step="0.001" value="0" aria-label="Posizione" />
+        <div><span id="currentTime">0:00.0</span><span id="duration">0:00.0</span></div>
+      </section>
+
+      <section class="effects">
+        <article class="effect panel accent-stretch">
+          <div class="effect-title"><span>01</span><h2>Stretch</h2></div>
+          <output id="stretchValue">1.00×</output>
+          <input id="stretch" type="range" min="0.5" max="2" step="0.01" value="1" aria-label="Fattore di stretch" />
+          <div class="range-labels"><span>½ tempo</span><span>2× durata</span></div>
+        </article>
+
+        <article class="effect panel">
+          <div class="effect-title"><span>02</span><h2>Delay</h2></div>
+          <label>Tempo <output id="delayTimeValue">280 ms</output></label>
+          <input id="delayTime" type="range" min="0" max="1.5" step="0.01" value="0.28" aria-label="Tempo delay" />
+          <label>Feedback <output id="feedbackValue">35%</output></label>
+          <input id="feedback" type="range" min="0" max="0.85" step="0.01" value="0.35" aria-label="Feedback delay" />
+          <label>Mix <output id="delayMixValue">25%</output></label>
+          <input id="delayMix" type="range" min="0" max="1" step="0.01" value="0.25" aria-label="Mix delay" />
+        </article>
+
+        <article class="effect panel">
+          <div class="effect-title"><span>03</span><h2>Riverbero</h2></div>
+          <label>Dimensione <output id="reverbSizeValue">2.4 s</output></label>
+          <input id="reverbSize" type="range" min="0.3" max="5" step="0.1" value="2.4" aria-label="Dimensione riverbero" />
+          <label>Mix <output id="reverbMixValue">20%</output></label>
+          <input id="reverbMix" type="range" min="0" max="1" step="0.01" value="0.2" aria-label="Mix riverbero" />
+        </article>
+
+        <article class="effect panel">
+          <div class="effect-title"><span>04</span><h2>Distorsione</h2></div>
+          <label>Drive <output id="driveValue">8 dB</output></label>
+          <input id="drive" type="range" min="0" max="30" step="0.5" value="8" aria-label="Drive distorsione" />
+          <label>Mix <output id="distMixValue">15%</output></label>
+          <input id="distMix" type="range" min="0" max="1" step="0.01" value="0.15" aria-label="Mix distorsione" />
+        </article>
+      </section>
+
+      <footer>Elaborazione locale · nessun file viene caricato online</footer>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
