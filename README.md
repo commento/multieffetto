@@ -3,10 +3,15 @@
 Un multieffetto per campioni audio che gira interamente nel browser. Include:
 
 - time-stretch granulare in tempo reale (0.5×–2×), indipendente dal pitch;
+- pitch shifter granulare da −12 a +12 semitoni, indipendente dallo stretch;
 - delay con tempo, feedback e mix;
 - riverbero a convoluzione con dimensione e mix;
 - distorsione soft-clipping con drive e mix;
+- equalizzatore a tre bande (160 Hz, 1 kHz e 6,5 kHz), ±12 dB;
+- riproduzione forward/reverse, commutabile anche durante il playback;
 - caricamento/cambio campione, play, pausa, stop e seek.
+- salvataggio, richiamo e cancellazione dei preset nel browser.
+- catena EQ/Distorsione/Delay/Riverbero riordinabile, salvata insieme al preset.
 
 ## Avvio
 

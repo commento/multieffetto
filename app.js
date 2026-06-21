@@ -1,10 +1,16 @@
 const $ = id => document.getElementById(id);
 const controls = {
-  file: $('fileInput'), play: $('playButton'), pause: $('pauseButton'), stop: $('stopButton'),
-  position: $('position'), stretch: $('stretch'), delayTime: $('delayTime'),
+  file: $('fileInput'), play: $('playButton'), pause: $('pauseButton'), stop: $('stopButton'), reverse: $('reverseButton'),
+  position: $('position'), stretch: $('stretch'), pitch: $('pitch'), delayTime: $('delayTime'),
   feedback: $('feedback'), delayMix: $('delayMix'), reverbSize: $('reverbSize'),
-  reverbMix: $('reverbMix'), drive: $('drive'), distMix: $('distMix')
+  reverbMix: $('reverbMix'), drive: $('drive'), distMix: $('distMix'),
+  eqLow: $('eqLow'), eqMid: $('eqMid'), eqHigh: $('eqHigh')
 };
+
+const presetControls = ['stretch', 'pitch', 'eqLow', 'eqMid', 'eqHigh', 'delayTime', 'feedback', 'delayMix', 'reverbSize', 'reverbMix', 'drive', 'distMix'];
+const PRESET_STORAGE_KEY = 'multieffetto-presets-v1';
+const effectLabels = { eq: 'EQ', distortion: 'Distorsione', delay: 'Delay', reverb: 'Riverbero' };
+let effectOrder = ['eq', 'distortion', 'delay', 'reverb'];
 
 let context;
 let player;
@@ -13,6 +19,10 @@ let loaded = false;
 let seeking = false;
 let decodedDuration = 0;
 let delayChangeTimer;
+let applyingPreset = false;
+let routingTimer;
+let reversed = false;
+let sampleLoadPromise = null;
 
 async function ensureAudio() {
   if (context) {
@@ -29,27 +39,45 @@ async function ensureAudio() {
   const distortionDry = context.createGain();
   const distortionWet = context.createGain();
   const shaper = context.createWaveShaper();
+  const distortionInput = context.createGain();
   const distortionBus = context.createGain();
   shaper.oversample = '4x';
+
+  const eqInput = context.createGain();
+  const eqLow = context.createBiquadFilter();
+  const eqMid = context.createBiquadFilter();
+  const eqHigh = context.createBiquadFilter();
+  const eqBus = context.createGain();
+  eqLow.type = 'lowshelf';
+  eqLow.frequency.value = 160;
+  eqMid.type = 'peaking';
+  eqMid.frequency.value = 1000;
+  eqMid.Q.value = 0.8;
+  eqHigh.type = 'highshelf';
+  eqHigh.frequency.value = 6500;
 
   const delayDry = context.createGain();
   const delayInputs = [context.createGain(), context.createGain()];
   const delayWets = [context.createGain(), context.createGain()];
   const delays = [context.createDelay(2), context.createDelay(2)];
   const feedbacks = [context.createGain(), context.createGain()];
+  const delayInput = context.createGain();
   const delayBus = context.createGain();
 
   const reverbDry = context.createGain();
   const reverbWet = context.createGain();
   const convolver = context.createConvolver();
+  const reverbInput = context.createGain();
+  const reverbBus = context.createGain();
   const master = context.createGain();
   master.gain.value = 0.82;
 
-  player.connect(distortionDry).connect(distortionBus);
-  player.connect(shaper).connect(distortionWet).connect(distortionBus);
-  distortionBus.connect(delayDry).connect(delayBus);
+  distortionInput.connect(distortionDry).connect(distortionBus);
+  distortionInput.connect(shaper).connect(distortionWet).connect(distortionBus);
+  eqInput.connect(eqLow).connect(eqMid).connect(eqHigh).connect(eqBus);
+  delayInput.connect(delayDry).connect(delayBus);
   for (let i = 0; i < 2; i++) {
-    distortionBus.connect(delayInputs[i]).connect(delays[i]).connect(delayWets[i]).connect(delayBus);
+    delayInput.connect(delayInputs[i]).connect(delays[i]).connect(delayWets[i]).connect(delayBus);
     delays[i].connect(feedbacks[i]).connect(delays[i]);
   }
   // Entrambe le linee restano alimentate: quella nascosta è già piena di audio
@@ -57,21 +85,60 @@ async function ensureAudio() {
   delayInputs[0].gain.value = 1;
   delayInputs[1].gain.value = 1;
   delayWets[1].gain.value = 0;
-  delayBus.connect(reverbDry).connect(master);
-  delayBus.connect(convolver).connect(reverbWet).connect(master);
+  reverbInput.connect(reverbDry).connect(reverbBus);
+  reverbInput.connect(convolver).connect(reverbWet).connect(reverbBus);
   master.connect(context.destination);
 
   graph = { distortionDry, distortionWet, shaper, delayDry, delayInputs, delayWets,
-    delays, feedbacks, activeDelay: 0, reverbDry, reverbWet, convolver };
+    delays, feedbacks, activeDelay: 0, reverbDry, reverbWet, convolver, master,
+    eqFilters: { low: eqLow, mid: eqMid, high: eqHigh },
+    stages: {
+      eq: { input: eqInput, output: eqBus },
+      distortion: { input: distortionInput, output: distortionBus },
+      delay: { input: delayInput, output: delayBus },
+      reverb: { input: reverbInput, output: reverbBus }
+    } };
+  routeEffects(false);
   updateAllEffects();
 
   player.port.onmessage = ({ data }) => {
     if (data.type === 'position' && !seeking) updateTimeline(data.position, data.duration);
     if (data.type === 'ended') {
       setPlaying(false);
-      updateTimeline(decodedDuration, decodedDuration);
+      updateTimeline(reversed ? 0 : decodedDuration, decodedDuration);
     }
   };
+}
+
+function routeEffects(smooth = true) {
+  if (!graph || !player) return;
+  const connectChain = () => {
+    player.disconnect();
+    Object.values(graph.stages).forEach(stage => stage.output.disconnect());
+    player.connect(graph.stages[effectOrder[0]].input);
+    for (let i = 0; i < effectOrder.length - 1; i++) {
+      graph.stages[effectOrder[i]].output.connect(graph.stages[effectOrder[i + 1]].input);
+    }
+    graph.stages[effectOrder[effectOrder.length - 1]].output.connect(graph.master);
+  };
+
+  if (!smooth) {
+    connectChain();
+    return;
+  }
+
+  clearTimeout(routingTimer);
+  const now = context.currentTime;
+  graph.master.gain.cancelScheduledValues(now);
+  graph.master.gain.setValueAtTime(graph.master.gain.value, now);
+  graph.master.gain.linearRampToValueAtTime(0, now + 0.015);
+  routingTimer = setTimeout(() => {
+    connectChain();
+    const resumeAt = context.currentTime;
+    graph.master.gain.cancelScheduledValues(resumeAt);
+    graph.master.gain.setValueAtTime(0, resumeAt);
+    graph.master.gain.linearRampToValueAtTime(0.82, resumeAt + 0.02);
+  }, 18);
 }
 
 function setPlaying(value) {
@@ -160,6 +227,8 @@ function makeImpulse(seconds) {
 function updateAllEffects() {
   if (!graph) return;
   player.port.postMessage({ type: 'stretch', value: +controls.stretch.value });
+  player.port.postMessage({ type: 'pitch', semitones: +controls.pitch.value });
+  player.port.postMessage({ type: 'reverse', value: reversed });
   graph.delays.forEach(delay => delay.delayTime.value = +controls.delayTime.value);
   graph.feedbacks.forEach(feedback => feedback.gain.value = +controls.feedback.value);
   updateDelayMix(+controls.delayMix.value);
@@ -167,11 +236,14 @@ function updateAllEffects() {
   equalPowerMix(+controls.distMix.value, graph.distortionDry, graph.distortionWet);
   graph.shaper.curve = distortionCurve(+controls.drive.value);
   graph.convolver.buffer = makeImpulse(+controls.reverbSize.value);
+  graph.eqFilters.low.gain.value = +controls.eqLow.value;
+  graph.eqFilters.mid.gain.value = +controls.eqMid.value;
+  graph.eqFilters.high.gain.value = +controls.eqHigh.value;
 }
 
-controls.file.addEventListener('change', async event => {
-  const file = event.target.files[0];
+async function loadSample(file) {
   if (!file) return;
+  loaded = false;
   try {
     await ensureAudio();
     const buffer = await context.decodeAudioData(await file.arrayBuffer());
@@ -191,9 +263,18 @@ controls.file.addEventListener('change', async event => {
     $('sampleName').textContent = 'Formato non supportato';
     $('sampleMeta').textContent = 'Prova un file WAV o MP3';
   }
+}
+
+controls.file.addEventListener('change', event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  sampleLoadPromise = loadSample(file).finally(() => {
+    sampleLoadPromise = null;
+  });
 });
 
 controls.play.addEventListener('click', async () => {
+  if (sampleLoadPromise) await sampleLoadPromise;
   if (!loaded) return controls.file.click();
   await ensureAudio();
   player.port.postMessage({ type: 'play' });
@@ -209,6 +290,19 @@ controls.stop.addEventListener('click', () => {
   player.port.postMessage({ type: 'stop' });
   setPlaying(false);
 });
+
+function setReverse(value, markManual = true) {
+  reversed = Boolean(value);
+  controls.reverse.classList.toggle('active', reversed);
+  controls.reverse.setAttribute('aria-pressed', String(reversed));
+  player?.port.postMessage({ type: 'reverse', value: reversed });
+  if (markManual && !applyingPreset) {
+    $('presetSelect').value = '';
+    $('deletePresetButton').disabled = true;
+  }
+}
+
+controls.reverse.addEventListener('click', () => setReverse(!reversed));
 controls.position.addEventListener('pointerdown', () => seeking = true);
 controls.position.addEventListener('input', () => {
   $('currentTime').textContent = formatTime(+controls.position.value * decodedDuration);
@@ -225,6 +319,7 @@ function bind(id, output, format, callback) {
   });
 }
 bind('stretch', 'stretchValue', value => `${value.toFixed(2)}×`, value => player.port.postMessage({ type: 'stretch', value }));
+bind('pitch', 'pitchValue', value => `${value > 0 ? '+' : ''}${value} st`, value => player.port.postMessage({ type: 'pitch', semitones: value }));
 bind('delayTime', 'delayTimeValue', value => `${Math.round(value * 1000)} ms`, scheduleDelayTime);
 bind('feedback', 'feedbackValue', value => `${Math.round(value * 100)}%`, value => graph.feedbacks.forEach(feedback => feedback.gain.setTargetAtTime(value, context.currentTime, 0.01)));
 bind('delayMix', 'delayMixValue', value => `${Math.round(value * 100)}%`, updateDelayMix);
@@ -232,6 +327,220 @@ bind('reverbMix', 'reverbMixValue', value => `${Math.round(value * 100)}%`, valu
 bind('drive', 'driveValue', value => `${value.toFixed(1)} dB`, value => graph.shaper.curve = distortionCurve(value));
 bind('distMix', 'distMixValue', value => `${Math.round(value * 100)}%`, value => equalPowerMix(value, graph.distortionDry, graph.distortionWet));
 bind('reverbSize', 'reverbSizeValue', value => `${value.toFixed(1)} s`);
+const formatEqGain = value => `${value > 0 ? '+' : ''}${value.toFixed(value % 1 ? 1 : 0)} dB`;
+bind('eqLow', 'eqLowValue', formatEqGain, value => graph.eqFilters.low.gain.setTargetAtTime(value, context.currentTime, 0.01));
+bind('eqMid', 'eqMidValue', formatEqGain, value => graph.eqFilters.mid.gain.setTargetAtTime(value, context.currentTime, 0.01));
+bind('eqHigh', 'eqHighValue', formatEqGain, value => graph.eqFilters.high.gain.setTargetAtTime(value, context.currentTime, 0.01));
 controls.reverbSize.addEventListener('change', () => {
   if (graph) graph.convolver.buffer = makeImpulse(+controls.reverbSize.value);
 });
+
+const stretchShortcutButtons = document.querySelectorAll('[data-stretch]');
+function updateStretchShortcuts() {
+  stretchShortcutButtons.forEach(button => {
+    const active = Math.abs(+button.dataset.stretch - +controls.stretch.value) < 0.001;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+stretchShortcutButtons.forEach(button => button.addEventListener('click', () => {
+  controls.stretch.value = button.dataset.stretch;
+  controls.stretch.dispatchEvent(new Event('input', { bubbles: true }));
+}));
+controls.stretch.addEventListener('input', updateStretchShortcuts);
+updateStretchShortcuts();
+
+const pitchShortcutButtons = document.querySelectorAll('[data-pitch]');
+function updatePitchShortcuts() {
+  pitchShortcutButtons.forEach(button => {
+    const active = +button.dataset.pitch === +controls.pitch.value;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+pitchShortcutButtons.forEach(button => button.addEventListener('click', () => {
+  controls.pitch.value = button.dataset.pitch;
+  controls.pitch.dispatchEvent(new Event('input', { bubbles: true }));
+}));
+controls.pitch.addEventListener('input', updatePitchShortcuts);
+updatePitchShortcuts();
+
+function normalizeEffectOrder(order) {
+  if (!Array.isArray(order)) return null;
+  const effects = Object.keys(effectLabels);
+  if (order.length === effects.length && effects.every(effect => order.includes(effect))) return [...order];
+  const legacyEffects = ['distortion', 'delay', 'reverb'];
+  if (order.length === 3 && legacyEffects.every(effect => order.includes(effect))) return ['eq', ...order];
+  return null;
+}
+
+function renderEffectChain() {
+  const chain = $('effectChain');
+  chain.replaceChildren();
+
+  const fixed = document.createElement('span');
+  fixed.className = 'chain-fixed';
+  fixed.textContent = 'Stretch + Pitch';
+  chain.append(fixed);
+
+  effectOrder.forEach((effect, index) => {
+    const stage = document.createElement('div');
+    stage.className = 'chain-stage';
+
+    const label = document.createElement('strong');
+    label.textContent = effectLabels[effect];
+    stage.append(label);
+
+    const controlsContainer = document.createElement('div');
+    controlsContainer.className = 'chain-controls';
+    for (const [direction, symbol, description] of [[-1, '←', 'prima'], [1, '→', 'dopo']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = symbol;
+      button.disabled = index + direction < 0 || index + direction >= effectOrder.length;
+      button.setAttribute('aria-label', `Sposta ${effectLabels[effect]} ${description}`);
+      button.addEventListener('click', () => moveEffect(effect, direction));
+      controlsContainer.append(button);
+    }
+    stage.append(controlsContainer);
+    chain.append(stage);
+  });
+
+  const stretchCard = document.querySelector('[data-effect-card="stretch"]');
+  const pitchCard = document.querySelector('[data-effect-card="pitch"]');
+  stretchCard.style.order = 0;
+  pitchCard.style.order = 1;
+  pitchCard.querySelector('.effect-title span').textContent = '02';
+  effectOrder.forEach((effect, index) => {
+    const card = document.querySelector(`[data-effect-card="${effect}"]`);
+    card.style.order = index + 2;
+    card.querySelector('.effect-title span').textContent = String(index + 3).padStart(2, '0');
+  });
+}
+
+function moveEffect(effect, direction) {
+  const current = effectOrder.indexOf(effect);
+  const destination = current + direction;
+  if (destination < 0 || destination >= effectOrder.length) return;
+  [effectOrder[current], effectOrder[destination]] = [effectOrder[destination], effectOrder[current]];
+  renderEffectChain();
+  routeEffects();
+  if (!applyingPreset) {
+    $('presetSelect').value = '';
+    $('deletePresetButton').disabled = true;
+  }
+  showPresetStatus(`Catena: ${effectOrder.map(effectName => effectLabels[effectName]).join(' / ')}`);
+}
+
+renderEffectChain();
+
+function readPresets() {
+  try {
+    return JSON.parse(localStorage.getItem(PRESET_STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writePresets(presets) {
+  localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presets));
+}
+
+function showPresetStatus(message) {
+  $('presetStatus').textContent = message;
+  clearTimeout(showPresetStatus.timer);
+  showPresetStatus.timer = setTimeout(() => $('presetStatus').textContent = '', 2200);
+}
+
+function renderPresetList(selectedName = '') {
+  const select = $('presetSelect');
+  const presets = readPresets();
+  select.replaceChildren(new Option('Manuale', ''));
+  Object.keys(presets).sort((a, b) => a.localeCompare(b)).forEach(name => {
+    select.add(new Option(name, name));
+  });
+  select.value = selectedName in presets ? selectedName : '';
+  $('deletePresetButton').disabled = !select.value;
+}
+
+function currentPresetValues() {
+  return {
+    ...Object.fromEntries(presetControls.map(id => [id, +controls[id].value])),
+    reverse: reversed,
+    effectOrder: [...effectOrder]
+  };
+}
+
+function applyPreset(values) {
+  applyingPreset = true;
+  setReverse(Boolean(values.reverse), false);
+  const savedOrder = normalizeEffectOrder(values.effectOrder);
+  if (savedOrder) {
+    effectOrder = savedOrder;
+    renderEffectChain();
+    routeEffects();
+  }
+  for (const id of presetControls) {
+    if (!(id in values)) continue;
+    controls[id].value = values[id];
+    controls[id].dispatchEvent(new Event('input', { bubbles: true }));
+    if (id === 'reverbSize') controls[id].dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  applyingPreset = false;
+}
+
+function savePreset() {
+  const input = $('presetName');
+  const name = input.value.trim();
+  if (!name) {
+    input.focus();
+    showPresetStatus('Inserisci un nome');
+    return;
+  }
+  try {
+    const presets = readPresets();
+    presets[name] = currentPresetValues();
+    writePresets(presets);
+    renderPresetList(name);
+    input.value = '';
+    showPresetStatus(`Salvato: ${name}`);
+  } catch {
+    showPresetStatus('Impossibile salvare');
+  }
+}
+
+$('savePresetButton').addEventListener('click', savePreset);
+$('presetName').addEventListener('keydown', event => {
+  if (event.key === 'Enter') savePreset();
+});
+
+$('presetSelect').addEventListener('change', event => {
+  const name = event.target.value;
+  $('deletePresetButton').disabled = !name;
+  if (!name) return;
+  const preset = readPresets()[name];
+  if (preset) {
+    applyPreset(preset);
+    showPresetStatus(`Richiamato: ${name}`);
+  }
+});
+
+$('deletePresetButton').addEventListener('click', () => {
+  const name = $('presetSelect').value;
+  if (!name) return;
+  const presets = readPresets();
+  delete presets[name];
+  writePresets(presets);
+  renderPresetList();
+  showPresetStatus(`Eliminato: ${name}`);
+});
+
+presetControls.forEach(id => controls[id].addEventListener('input', () => {
+  if (applyingPreset) return;
+  $('presetSelect').value = '';
+  $('deletePresetButton').disabled = true;
+}));
+
+renderPresetList();

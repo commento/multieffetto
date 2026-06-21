@@ -29,6 +29,7 @@
           <button id="playButton" class="primary" aria-label="Play">▶</button>
           <button id="pauseButton" aria-label="Pausa">Ⅱ</button>
           <button id="stopButton" aria-label="Stop">■</button>
+          <button id="reverseButton" class="reverse-button" aria-label="Riproduzione reverse" aria-pressed="false">REV</button>
         </div>
       </section>
 
@@ -37,15 +38,62 @@
         <div><span id="currentTime">0:00.0</span><span id="duration">0:00.0</span></div>
       </section>
 
+      <section class="presets panel" aria-label="Gestione preset">
+        <span class="preset-label">Preset</span>
+        <select id="presetSelect" aria-label="Richiama preset">
+          <option value="">Manuale</option>
+        </select>
+        <input id="presetName" type="text" maxlength="24" placeholder="Nome nuovo preset" aria-label="Nome preset" />
+        <button id="savePresetButton" class="text-button">Salva</button>
+        <button id="deletePresetButton" class="text-button" disabled>Elimina</button>
+        <span id="presetStatus" class="preset-status" aria-live="polite"></span>
+      </section>
+
+      <section class="chain panel" aria-label="Ordine degli effetti">
+        <span class="chain-label">Catena</span>
+        <div id="effectChain" class="chain-flow"></div>
+      </section>
+
       <section class="effects">
-        <article class="effect panel accent-stretch">
+        <article class="effect panel accent-stretch" data-effect-card="stretch">
           <div class="effect-title"><span>01</span><h2>Stretch</h2></div>
-          <output id="stretchValue">1.00×</output>
+          <div class="stretch-readout">
+            <output id="stretchValue">1.00×</output>
+            <div class="stretch-shortcuts" role="group" aria-label="Valori rapidi stretch">
+              <button type="button" data-stretch="0.5">0.5×</button>
+              <button type="button" data-stretch="1" class="active" aria-pressed="true">1×</button>
+              <button type="button" data-stretch="2">2×</button>
+            </div>
+          </div>
           <input id="stretch" type="range" min="0.5" max="2" step="0.01" value="1" aria-label="Fattore di stretch" />
           <div class="range-labels"><span>½ tempo</span><span>2× durata</span></div>
         </article>
 
-        <article class="effect panel">
+        <article class="effect panel pitch-effect" data-effect-card="pitch">
+          <div class="effect-title"><span>02</span><h2>Pitch Shifter</h2></div>
+          <div class="pitch-readout">
+            <output id="pitchValue">0 st</output>
+            <div class="pitch-shortcuts" role="group" aria-label="Valori rapidi pitch">
+              <button type="button" data-pitch="-12">−12</button>
+              <button type="button" data-pitch="0" class="active" aria-pressed="true">0</button>
+              <button type="button" data-pitch="12">+12</button>
+            </div>
+          </div>
+          <input id="pitch" type="range" min="-12" max="12" step="1" value="0" aria-label="Pitch in semitoni" />
+          <div class="range-labels"><span>−12 · ottava sotto</span><span>+12 · ottava sopra</span></div>
+        </article>
+
+        <article class="effect panel" data-effect-card="eq">
+          <div class="effect-title"><span>02</span><h2>Equalizzatore</h2></div>
+          <label>Bassi · 160 Hz <output id="eqLowValue">0 dB</output></label>
+          <input id="eqLow" type="range" min="-12" max="12" step="0.5" value="0" aria-label="Guadagno bassi EQ" />
+          <label>Medi · 1 kHz <output id="eqMidValue">0 dB</output></label>
+          <input id="eqMid" type="range" min="-12" max="12" step="0.5" value="0" aria-label="Guadagno medi EQ" />
+          <label>Alti · 6.5 kHz <output id="eqHighValue">0 dB</output></label>
+          <input id="eqHigh" type="range" min="-12" max="12" step="0.5" value="0" aria-label="Guadagno alti EQ" />
+        </article>
+
+        <article class="effect panel" data-effect-card="delay">
           <div class="effect-title"><span>02</span><h2>Delay</h2></div>
           <label>Tempo <output id="delayTimeValue">280 ms</output></label>
           <input id="delayTime" type="range" min="0" max="1.5" step="0.01" value="0.28" aria-label="Tempo delay" />
@@ -55,7 +103,7 @@
           <input id="delayMix" type="range" min="0" max="1" step="0.01" value="0.25" aria-label="Mix delay" />
         </article>
 
-        <article class="effect panel">
+        <article class="effect panel" data-effect-card="reverb">
           <div class="effect-title"><span>03</span><h2>Riverbero</h2></div>
           <label>Dimensione <output id="reverbSizeValue">2.4 s</output></label>
           <input id="reverbSize" type="range" min="0.3" max="5" step="0.1" value="2.4" aria-label="Dimensione riverbero" />
@@ -63,7 +111,7 @@
           <input id="reverbMix" type="range" min="0" max="1" step="0.01" value="0.2" aria-label="Mix riverbero" />
         </article>
 
-        <article class="effect panel">
+        <article class="effect panel" data-effect-card="distortion">
           <div class="effect-title"><span>04</span><h2>Distorsione</h2></div>
           <label>Drive <output id="driveValue">8 dB</output></label>
           <input id="drive" type="range" min="0" max="30" step="0.5" value="8" aria-label="Drive distorsione" />

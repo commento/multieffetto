@@ -6,6 +6,8 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
     this.sourceRate = sampleRate;
     this.position = 0;
     this.stretch = 1;
+    this.pitch = 1;
+    this.reverse = false;
     this.playing = false;
     this.grains = [];
     this.samplesUntilGrain = 0;
@@ -23,7 +25,8 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         this.playing = false;
         this.port.postMessage({ type: 'position', position: 0, duration: this.length / this.sourceRate });
       } else if (data.type === 'play') {
-        if (this.position >= this.length - 1) this.position = 0;
+        if (this.reverse && (this.position <= 0 || this.position >= this.length)) this.position = this.length - 1;
+        if (!this.reverse && (this.position >= this.length - 1 || this.position < 0)) this.position = 0;
         this.playing = true;
       } else if (data.type === 'pause') {
         this.playing = false;
@@ -34,6 +37,13 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         this.port.postMessage({ type: 'position', position: 0, duration: this.length / this.sourceRate });
       } else if (data.type === 'stretch') {
         this.stretch = Math.max(0.5, Math.min(2, data.value));
+      } else if (data.type === 'pitch') {
+        const semitones = Math.max(-12, Math.min(12, data.semitones));
+        this.pitch = Math.pow(2, semitones / 12);
+      } else if (data.type === 'reverse') {
+        this.reverse = Boolean(data.value);
+        if (this.reverse && this.position >= this.length) this.position = this.length - 1;
+        if (!this.reverse && this.position < 0) this.position = 0;
       } else if (data.type === 'seek') {
         this.position = Math.max(0, Math.min(this.length - 1, data.ratio * this.length));
         this.grains = [];
@@ -50,11 +60,14 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
   }
 
   spawnGrain() {
-    this.grains.push({ sourceStart: this.position, age: 0 });
+    const direction = this.reverse ? -1 : 1;
+    this.grains.push({ sourceStart: this.position, age: 0, pitch: this.pitch, direction });
     const rateConversion = this.sourceRate / sampleRate;
-    this.position += (this.hopOut / this.stretch) * rateConversion;
+    this.position += direction * (this.hopOut / this.stretch) * rateConversion;
     if (this.position >= this.length) {
       this.position = this.length;
+    } else if (this.position < 0) {
+      this.position = -1;
     }
   }
 
@@ -64,7 +77,8 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < output[0].length; i++) {
       if (this.playing && this.channels.length) {
-        if (this.samplesUntilGrain <= 0 && this.position < this.length) {
+        const hasSource = this.reverse ? this.position >= 0 : this.position < this.length;
+        if (this.samplesUntilGrain <= 0 && hasSource) {
           this.spawnGrain();
           this.samplesUntilGrain = this.hopOut;
         }
@@ -72,7 +86,7 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         for (const grain of this.grains) {
           const phase = grain.age / this.grainSize;
           const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
-          const sourcePosition = grain.sourceStart + grain.age * (this.sourceRate / sampleRate);
+          const sourcePosition = grain.sourceStart + grain.direction * grain.age * (this.sourceRate / sampleRate) * grain.pitch;
           for (let channel = 0; channel < output.length; channel++) {
             output[channel][i] += this.read(channel, sourcePosition) * window * 0.67;
           }
@@ -82,7 +96,8 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         this.grains = this.grains.filter(grain => grain.age < this.grainSize);
         this.samplesUntilGrain--;
 
-        if (this.position >= this.length && this.grains.length === 0) {
+        const reachedEnd = this.reverse ? this.position < 0 : this.position >= this.length;
+        if (reachedEnd && this.grains.length === 0) {
           this.playing = false;
           this.port.postMessage({ type: 'ended' });
         }
@@ -92,7 +107,7 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         this.reportCountdown = Math.floor(sampleRate / 20);
         this.port.postMessage({
           type: 'position',
-          position: this.position / this.sourceRate,
+          position: Math.max(0, Math.min(this.length, this.position)) / this.sourceRate,
           duration: this.length / this.sourceRate
         });
       }
