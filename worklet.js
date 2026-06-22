@@ -11,8 +11,11 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
     this.playing = false;
     this.grains = [];
     this.samplesUntilGrain = 0;
-    this.grainSize = 2048;
+    // Otto grani sovrapposti danno una tessitura molto più continua rispetto
+    // alla vecchia configurazione a quattro grani, soprattutto su voci e pad.
+    this.grainSize = 4096;
     this.hopOut = 512;
+    this.windowGain = this.hopOut * 2 / this.grainSize;
     this.reportCountdown = 0;
 
     this.port.onmessage = ({ data }) => {
@@ -51,18 +54,95 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
     };
   }
 
-  read(channel, position) {
+  sample(channel, index) {
     const data = this.channels[Math.min(channel, this.channels.length - 1)];
-    if (!data || position < 0 || position >= data.length - 1) return 0;
+    if (!data || index < 0 || index >= data.length) return 0;
+    return data[index];
+  }
+
+  readCubic(channel, position) {
     const index = Math.floor(position);
     const fraction = position - index;
-    return data[index] + (data[index + 1] - data[index]) * fraction;
+    const a = this.sample(channel, index - 1);
+    const b = this.sample(channel, index);
+    const c = this.sample(channel, index + 1);
+    const d = this.sample(channel, index + 2);
+    const c0 = b;
+    const c1 = 0.5 * (c - a);
+    const c2 = a - 2.5 * b + 2 * c - 0.5 * d;
+    const c3 = 0.5 * (d - a) + 1.5 * (b - c);
+    return ((c3 * fraction + c2) * fraction + c1) * fraction + c0;
+  }
+
+  read(channel, position, step) {
+    // Quando si alza il pitch si saltano campioni. Un piccolo interpolatore
+    // sinc a banda limitata evita che le alte frequenze si ripieghino in alias.
+    if (step <= 1.02) return this.readCubic(channel, position);
+
+    const radius = 6;
+    const cutoff = 1 / step;
+    const center = Math.floor(position);
+    let value = 0;
+    let weightSum = 0;
+    for (let offset = -radius + 1; offset <= radius; offset++) {
+      const distance = position - (center + offset);
+      if (Math.abs(distance) >= radius) continue;
+      const sincArgument = Math.PI * cutoff * distance;
+      const sinc = Math.abs(sincArgument) < 1e-7 ? 1 : Math.sin(sincArgument) / sincArgument;
+      const window = 0.5 + 0.5 * Math.cos(Math.PI * distance / radius);
+      const weight = cutoff * sinc * window;
+      value += this.sample(channel, center + offset) * weight;
+      weightSum += weight;
+    }
+    return weightSum ? value / weightSum : 0;
+  }
+
+  alignGrainStart(expectedStart, step, direction) {
+    const previous = this.grains[this.grains.length - 1];
+    if (!previous) return expectedStart;
+
+    const referenceStart = previous.sourceStart + previous.direction * previous.age * previous.step;
+    const searchRadius = 96;
+    const searchStep = 4;
+    const compareLength = 128;
+    const compareStep = 4;
+    let bestStart = expectedStart;
+    let bestScore = -Infinity;
+
+    for (let offset = -searchRadius; offset <= searchRadius; offset += searchStep) {
+      const candidateStart = expectedStart + direction * offset;
+      let correlation = 0;
+      let referenceEnergy = 0;
+      let candidateEnergy = 0;
+      for (let age = 0; age < compareLength; age += compareStep) {
+        const reference = this.readCubic(0, referenceStart + direction * age * step);
+        const candidate = this.readCubic(0, candidateStart + direction * age * step);
+        correlation += reference * candidate;
+        referenceEnergy += reference * reference;
+        candidateEnergy += candidate * candidate;
+      }
+      if (referenceEnergy < 1e-8 || candidateEnergy < 1e-8) continue;
+      const normalized = correlation / Math.sqrt(referenceEnergy * candidateEnergy);
+      const score = normalized - Math.abs(offset) / searchRadius * 0.025;
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = candidateStart;
+      }
+    }
+    return bestStart;
   }
 
   spawnGrain() {
     const direction = this.reverse ? -1 : 1;
-    this.grains.push({ sourceStart: this.position, age: 0, pitch: this.pitch, direction });
     const rateConversion = this.sourceRate / sampleRate;
+    const step = rateConversion * this.pitch;
+    const sourceStart = this.alignGrainStart(this.position, step, direction);
+    this.grains.push({
+      sourceStart,
+      age: 0,
+      step,
+      direction
+    });
     this.position += direction * (this.hopOut / this.stretch) * rateConversion;
     if (this.position >= this.length) {
       this.position = this.length;
@@ -86,9 +166,9 @@ class GranularStretchProcessor extends AudioWorkletProcessor {
         for (const grain of this.grains) {
           const phase = grain.age / this.grainSize;
           const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
-          const sourcePosition = grain.sourceStart + grain.direction * grain.age * (this.sourceRate / sampleRate) * grain.pitch;
+          const sourcePosition = grain.sourceStart + grain.direction * grain.age * grain.step;
           for (let channel = 0; channel < output.length; channel++) {
-            output[channel][i] += this.read(channel, sourcePosition) * window * 0.67;
+            output[channel][i] += this.read(channel, sourcePosition, grain.step) * window * this.windowGain;
           }
           grain.age++;
         }
