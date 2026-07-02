@@ -10,6 +10,7 @@ Un multieffetto per campioni audio che gira interamente nel browser. Include:
 - equalizzatore a tre bande (160 Hz, 1 kHz e 6,5 kHz), ±12 dB;
 - riproduzione forward/reverse, commutabile anche durante il playback;
 - caricamento/cambio campione, play, pausa, stop e seek.
+- caricamento AIFF/AIFC PCM con decoder di riserva per Safari;
 - salvataggio, richiamo e cancellazione dei preset nel browser.
 - catena EQ/Distorsione/Delay/Riverbero riordinabile, salvata insieme al preset.
 

@@ -1,3 +1,5 @@
+import { decodeAiff } from './aiff-decoder.mjs';
+
 const $ = id => document.getElementById(id);
 const controls = {
   file: $('fileInput'), play: $('playButton'), pause: $('pauseButton'), stop: $('stopButton'), reverse: $('reverseButton'),
@@ -246,7 +248,19 @@ async function loadSample(file) {
   loaded = false;
   try {
     await ensureAudio();
-    const buffer = await context.decodeAudioData(await file.arrayBuffer());
+    const fileData = await file.arrayBuffer();
+    let buffer;
+    try {
+      // Safari puo rifiutare alcuni AIFF/AIFC anche se Web Audio li supporta
+      // parzialmente. Conserviamo il decoder nativo come percorso principale.
+      buffer = await context.decodeAudioData(fileData.slice(0));
+    } catch (nativeError) {
+      try {
+        buffer = decodeAiff(fileData, context);
+      } catch {
+        throw nativeError;
+      }
+    }
     const channels = [];
     for (let i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i).slice().buffer);
     player.port.postMessage({
@@ -261,7 +275,7 @@ async function loadSample(file) {
   } catch (error) {
     console.error(error);
     $('sampleName').textContent = 'Formato non supportato';
-    $('sampleMeta').textContent = 'Prova un file WAV o MP3';
+    $('sampleMeta').textContent = 'Prova WAV, MP3, M4A oppure AIFF PCM';
   }
 }
 
