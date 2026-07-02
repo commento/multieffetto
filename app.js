@@ -6,10 +6,11 @@ const controls = {
   position: $('position'), stretch: $('stretch'), pitch: $('pitch'), delayTime: $('delayTime'),
   feedback: $('feedback'), delayMix: $('delayMix'), reverbSize: $('reverbSize'),
   reverbMix: $('reverbMix'), drive: $('drive'), distMix: $('distMix'),
-  eqLow: $('eqLow'), eqMid: $('eqMid'), eqHigh: $('eqHigh')
+  eqLow: $('eqLow'), eqMid: $('eqMid'), eqHigh: $('eqHigh'),
+  random: $('randomButton'), randomCadence: $('randomCadence'), randomLength: $('randomLength')
 };
 
-const presetControls = ['stretch', 'pitch', 'eqLow', 'eqMid', 'eqHigh', 'delayTime', 'feedback', 'delayMix', 'reverbSize', 'reverbMix', 'drive', 'distMix'];
+const presetControls = ['stretch', 'pitch', 'randomCadence', 'randomLength', 'eqLow', 'eqMid', 'eqHigh', 'delayTime', 'feedback', 'delayMix', 'reverbSize', 'reverbMix', 'drive', 'distMix'];
 const PRESET_STORAGE_KEY = 'multieffetto-presets-v1';
 const effectLabels = { eq: 'EQ', distortion: 'Distorsione', delay: 'Delay', reverb: 'Riverbero' };
 let effectOrder = ['eq', 'distortion', 'delay', 'reverb'];
@@ -24,7 +25,91 @@ let delayChangeTimer;
 let applyingPreset = false;
 let routingTimer;
 let reversed = false;
+let randomEnabled = false;
 let sampleLoadPromise = null;
+let waveformPeaks = null;
+
+function buildWaveformPeaks(buffer, resolution = 2400) {
+  const bins = Math.min(resolution, buffer.length);
+  const minimum = new Float32Array(bins);
+  const maximum = new Float32Array(bins);
+  const channels = Array.from(
+    { length: buffer.numberOfChannels },
+    (_, channel) => buffer.getChannelData(channel)
+  );
+  let absolutePeak = 0;
+
+  for (let bin = 0; bin < bins; bin++) {
+    const start = Math.floor(bin * buffer.length / bins);
+    const end = Math.max(start + 1, Math.floor((bin + 1) * buffer.length / bins));
+    let low = 1;
+    let high = -1;
+    for (const channel of channels) {
+      for (let sample = start; sample < end; sample++) {
+        const value = channel[sample];
+        if (value < low) low = value;
+        if (value > high) high = value;
+      }
+    }
+    minimum[bin] = low;
+    maximum[bin] = high;
+    absolutePeak = Math.max(absolutePeak, Math.abs(low), Math.abs(high));
+  }
+
+  return { minimum, maximum, absolutePeak: absolutePeak || 1 };
+}
+
+function drawWaveform() {
+  const canvas = $('waveform');
+  const bounds = canvas.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.round(bounds.width * scale);
+  canvas.height = Math.round(bounds.height * scale);
+  const drawing = canvas.getContext('2d');
+  drawing.scale(scale, scale);
+  drawing.clearRect(0, 0, bounds.width, bounds.height);
+
+  const center = bounds.height / 2;
+  drawing.strokeStyle = '#282622';
+  drawing.lineWidth = 1;
+  drawing.beginPath();
+  drawing.moveTo(0, center + 0.5);
+  drawing.lineTo(bounds.width, center + 0.5);
+  drawing.stroke();
+  if (!waveformPeaks) return;
+
+  const { minimum, maximum, absolutePeak } = waveformPeaks;
+  drawing.strokeStyle = '#8d8981';
+  drawing.lineWidth = 1;
+  drawing.beginPath();
+  for (let x = 0; x < Math.ceil(bounds.width); x++) {
+    const first = Math.floor(x * minimum.length / bounds.width);
+    const last = Math.max(first + 1, Math.ceil((x + 1) * minimum.length / bounds.width));
+    let low = 1;
+    let high = -1;
+    for (let bin = first; bin < Math.min(last, minimum.length); bin++) {
+      low = Math.min(low, minimum[bin]);
+      high = Math.max(high, maximum[bin]);
+    }
+    const top = center - high / absolutePeak * (center - 5);
+    const bottom = center - low / absolutePeak * (center - 5);
+    drawing.moveTo(x + 0.5, top);
+    drawing.lineTo(x + 0.5, bottom);
+  }
+  drawing.stroke();
+}
+
+function setWaveform(buffer) {
+  waveformPeaks = buffer ? buildWaveformPeaks(buffer) : null;
+  drawWaveform();
+}
+
+if ('ResizeObserver' in window) {
+  new ResizeObserver(drawWaveform).observe($('waveform'));
+} else {
+  window.addEventListener('resize', drawWaveform);
+}
 
 async function ensureAudio() {
   if (context) {
@@ -33,7 +118,7 @@ async function ensureAudio() {
   }
 
   context = new AudioContext({ latencyHint: 'interactive' });
-  await context.audioWorklet.addModule('worklet.js');
+  await context.audioWorklet.addModule('worklet.js?v=3');
   player = new AudioWorkletNode(context, 'granular-stretch', {
     outputChannelCount: [2]
   });
@@ -231,6 +316,9 @@ function updateAllEffects() {
   player.port.postMessage({ type: 'stretch', value: +controls.stretch.value });
   player.port.postMessage({ type: 'pitch', semitones: +controls.pitch.value });
   player.port.postMessage({ type: 'reverse', value: reversed });
+  player.port.postMessage({ type: 'random', enabled: randomEnabled });
+  player.port.postMessage({ type: 'randomCadence', value: +controls.randomCadence.value });
+  player.port.postMessage({ type: 'randomLength', value: +controls.randomLength.value });
   graph.delays.forEach(delay => delay.delayTime.value = +controls.delayTime.value);
   graph.feedbacks.forEach(feedback => feedback.gain.value = +controls.feedback.value);
   updateDelayMix(+controls.delayMix.value);
@@ -246,6 +334,7 @@ function updateAllEffects() {
 async function loadSample(file) {
   if (!file) return;
   loaded = false;
+  setWaveform(null);
   try {
     await ensureAudio();
     const fileData = await file.arrayBuffer();
@@ -266,6 +355,7 @@ async function loadSample(file) {
     player.port.postMessage({
       type: 'load', channels, length: buffer.length, sampleRate: buffer.sampleRate
     }, channels);
+    setWaveform(buffer);
     loaded = true;
     decodedDuration = buffer.duration;
     $('sampleName').textContent = file.name;
@@ -317,6 +407,20 @@ function setReverse(value, markManual = true) {
 }
 
 controls.reverse.addEventListener('click', () => setReverse(!reversed));
+
+function setRandom(value, markManual = true) {
+  randomEnabled = Boolean(value);
+  controls.random.classList.toggle('active', randomEnabled);
+  controls.random.setAttribute('aria-pressed', String(randomEnabled));
+  controls.random.textContent = randomEnabled ? 'ON' : 'OFF';
+  player?.port.postMessage({ type: 'random', enabled: randomEnabled });
+  if (markManual && !applyingPreset) {
+    $('presetSelect').value = '';
+    $('deletePresetButton').disabled = true;
+  }
+}
+
+controls.random.addEventListener('click', () => setRandom(!randomEnabled));
 controls.position.addEventListener('pointerdown', () => seeking = true);
 controls.position.addEventListener('input', () => {
   $('currentTime').textContent = formatTime(+controls.position.value * decodedDuration);
@@ -334,6 +438,8 @@ function bind(id, output, format, callback) {
 }
 bind('stretch', 'stretchValue', value => `${value.toFixed(2)}×`, value => player.port.postMessage({ type: 'stretch', value }));
 bind('pitch', 'pitchValue', value => `${value > 0 ? '+' : ''}${value} st`, value => player.port.postMessage({ type: 'pitch', semitones: value }));
+bind('randomCadence', 'randomCadenceValue', value => `${Math.round(value * 1000)} ms`, value => player.port.postMessage({ type: 'randomCadence', value }));
+bind('randomLength', 'randomLengthValue', value => `${Math.round(value * 1000)} ms`, value => player.port.postMessage({ type: 'randomLength', value }));
 bind('delayTime', 'delayTimeValue', value => `${Math.round(value * 1000)} ms`, scheduleDelayTime);
 bind('feedback', 'feedbackValue', value => `${Math.round(value * 100)}%`, value => graph.feedbacks.forEach(feedback => feedback.gain.setTargetAtTime(value, context.currentTime, 0.01)));
 bind('delayMix', 'delayMixValue', value => `${Math.round(value * 100)}%`, updateDelayMix);
@@ -483,6 +589,7 @@ function currentPresetValues() {
   return {
     ...Object.fromEntries(presetControls.map(id => [id, +controls[id].value])),
     reverse: reversed,
+    random: randomEnabled,
     effectOrder: [...effectOrder]
   };
 }
@@ -490,6 +597,7 @@ function currentPresetValues() {
 function applyPreset(values) {
   applyingPreset = true;
   setReverse(Boolean(values.reverse), false);
+  setRandom(Boolean(values.random), false);
   const savedOrder = normalizeEffectOrder(values.effectOrder);
   if (savedOrder) {
     effectOrder = savedOrder;
